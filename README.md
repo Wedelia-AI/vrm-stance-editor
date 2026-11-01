@@ -14,6 +14,10 @@ exporting the pose as a looping VRMA idle.
   preview, day / evening lighting, a reference image overlay.
 - **Motion / 动作**: small habitual motions as key poses — add a key from the current stance, pose the next one
   (say, a hand up to the hair), set times and easing, play / loop, and save `motion-<name>.json`.
+- **AI motions / AI 生成动作** (optional): describe a motion in a sentence ("tuck the hair behind the right ear"); a
+  local service asks Claude for goal key poses (wrist position relative to the head, finger and palm direction, finger
+  curls, head tilt), the editor solves them with arm IK into editable keys. **AI 自检优化** sends a still of every key
+  back so Claude can look at the result and correct it.
 - **Appearance / 外观**: show or hide each mesh, every morph target of the non-face meshes (lengths, socks, hair
   styles...), replace any material's texture with an image (the original alpha is kept; a baked MToon shade texture
   is re-derived so shaded areas change colour too).
@@ -46,6 +50,15 @@ length is the last key's time.
 
 The idle clip holds the pose with slow breathing (chest and shoulders rise, neck counter-rotates so the head stays still)
 and a small weight shift of the hips; pin the feet in your player so they stay planted.
+
+### AI motions
+
+```sh
+node tools/motion_agent.mjs dist 8940 127.0.0.1   # serves dist/ and /api/motion; uses the `claude` CLI (Claude Code, logged in)
+```
+
+Open http://127.0.0.1:8940/ instead of the plain server. `MOTION_MODEL` picks the model (default `sonnet`).
+Precise two-hand finger shapes (a finger heart) are the weak spot; arm-led motions come out well.
 
 ### Conventions
 

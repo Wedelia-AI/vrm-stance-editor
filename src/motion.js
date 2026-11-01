@@ -5,7 +5,7 @@ import * as THREE from 'three';
 
 const EASE = { '平滑': u => u * u * (3 - 2 * u), '缓入缓出': u => (u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2), '线性': u => u };
 
-export function createMotion({ el, box, snapshot, restore, poseOf, status }) {
+export function createMotion({ el, box, snapshot, restore, poseOf, status, ai }) {
   let keys = [], playing = false, loop = true, tPlay = 0, name = 'habit', current = -1;
   const D = THREE.MathUtils.degToRad, e = new THREE.Euler();
   const quatsOf = (P, AX) => Object.fromEntries(Object.entries(P).map(([b, p]) => [b, new THREE.Quaternion().setFromEuler(e.set(AX[0] * D(p[0]), AX[1] * D(p[1]), AX[2] * D(p[2]), 'XYZ'))]));
@@ -17,7 +17,32 @@ export function createMotion({ el, box, snapshot, restore, poseOf, status }) {
   const nameIn = el('input', { type: 'text', value: name, oninput: () => { name = nameIn.value; } });
   const playBtn = el('button', { textContent: '▶ 播放', className: 'primary', onclick: () => toggle() });
   const loopCb = el('input', { type: 'checkbox', checked: true, onchange: () => { loop = loopCb.checked; } });
+  // AI: describe a motion, a local service (tools/motion_agent.mjs, Claude) returns goal keys, the editor solves them
+  let lastSpec = null, lastDesc = '';
+  const desc = el('textarea', { rows: 2, placeholder: '描述一个小动作，例如：害羞地把右边头发别到耳后', style: 'width:100%;box-sizing:border-box;font:inherit;padding:6px;border:1px solid var(--line);border-radius:6px' });
+  const aiState = el('div', { className: 'hint' });
+  const call = async (path, body) => {
+    const r = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const j = await r.json().catch(() => ({})); if (!r.ok || !j.spec) throw new Error(j.error || `${r.status}`); return j.spec;
+  };
+  async function aiRun(refine) {
+    if (!ai) return;
+    const d = refine ? lastDesc : desc.value.trim(); if (!d) return status('先写一句动作描述');
+    const t0 = Date.now(); aiState.textContent = refine ? 'AI 正在看截图修改…（约 1–2 分钟）' : 'AI 正在生成…（约 1 分钟）'; stopPlay();
+    try {
+      const body = { description: d, landmarks: ai.landmarks(), sliders: ai.sliderNames, stance: snapshot() };
+      if (refine) { body.spec = lastSpec; body.shots = await ai.shots(keys.map(k => k.state)); }
+      const spec = await call(refine ? 'api/motion/refine' : 'api/motion', body);
+      const ks = await ai.solve(spec); lastSpec = spec; lastDesc = d;
+      load({ name: spec.name || 'ai', loop: true, keys: ks }); playing = true; tPlay = 0; playBtn.textContent = '■ 停止';
+      aiState.textContent = `完成（${Math.round((Date.now() - t0) / 1000)} 秒）：${spec.note || ''}`;
+    } catch (e) { aiState.textContent = `失败：${e.message}（需要在本机运行动作服务 tools/motion_agent.mjs）`; }
+  }
   box.append(
+    el('h3', { textContent: 'AI 生成小动作' }), desc,
+    el('div', { className: 'chips' }, el('button', { textContent: 'AI 生成', className: 'primary', onclick: () => aiRun(false) }),
+      el('button', { textContent: 'AI 自检优化', title: '把每个关键帧截图给 AI 看，按画面修正一轮', onclick: () => { if (lastSpec) aiRun(true); else status('先生成一次'); } })),
+    aiState,
     el('h3', { textContent: '小动作（关键帧）' }),
     el('div', { className: 'hint', textContent: '先在「站姿」页摆好起始姿势 → 「添加关键帧」；再摆下一个姿势（比如手抬到耳边）→ 再添加；最后「回到第 1 帧」让动作收回。时间是这一帧出现的秒数。' }),
     el('label', {}, el('span', { textContent: '动作名' }), nameIn, el('span')),

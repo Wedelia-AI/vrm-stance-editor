@@ -236,7 +236,74 @@ async function main(modelBuffer) {
     fine = j.fine || {}; if (j.name) nameIn.value = j.name; app.load(j.appearance);
     for (const k of Object.keys(inputs)) { inputs[k].r.value = val[k]; inputs[k].show(); } showFine();
   };
+  // ---- goal-driven posing for AI motions (11-02): "wrist here (head frame), fingers / palm that way" + slider tweaks
+  // per key, solved with two-bone arm IK, stored as editor state (sliders + per-bone fine offsets)
+  const tick = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  const wpos = n => { vrm.scene.updateMatrixWorld(true); return N(n).getWorldPosition(new THREE.Vector3()); };
+  const rotW = (bone, q) => { const wq = bone.getWorldQuaternion(new THREE.Quaternion()), pq = bone.parent.getWorldQuaternion(new THREE.Quaternion());
+    bone.quaternion.copy(pq.invert().multiply(q.clone().multiply(wq))); vrm.scene.updateMatrixWorld(true); };
+  const headNode = () => { vrm.scene.updateMatrixWorld(true); return N('head'); };
+  const fromHead = a => headNode().localToWorld(new THREE.Vector3(a[0] * AX[0], a[1], a[2] * AX[2]));
+  const toHead = v3 => { const l = headNode().worldToLocal(v3.clone()); return [l.x * AX[0], l.y, l.z * AX[2]].map(x => Math.round(x * 1000) / 1000); };
+  const dirHead = a => new THREE.Vector3(a[0] * AX[0], a[1], a[2] * AX[2]).applyQuaternion(headNode().getWorldQuaternion(new THREE.Quaternion())).normalize();
+  function reach(side, T, pole) {
+    const up = N(`${side}UpperArm`), lo = N(`${side}LowerArm`);
+    const A = wpos(`${side}UpperArm`), B = wpos(`${side}LowerArm`), C = wpos(`${side}Hand`);
+    const a = A.distanceTo(B), c = B.distanceTo(C), d = Math.min(A.distanceTo(T), a + c - 1e-4);
+    const u = T.clone().sub(A).normalize(), pv = pole.clone().sub(A); pv.sub(u.clone().multiplyScalar(pv.dot(u))).normalize();
+    const al = Math.acos(THREE.MathUtils.clamp((a * a + d * d - c * c) / (2 * a * d), -1, 1));
+    const Bt = A.clone().add(u.clone().multiplyScalar(a * Math.cos(al))).add(pv.multiplyScalar(a * Math.sin(al)));
+    rotW(up, new THREE.Quaternion().setFromUnitVectors(B.clone().sub(A).normalize(), Bt.clone().sub(A).normalize()));
+    const B2 = wpos(`${side}LowerArm`), C2 = wpos(`${side}Hand`);
+    rotW(lo, new THREE.Quaternion().setFromUnitVectors(C2.clone().sub(B2).normalize(), T.clone().sub(B2).normalize()));
+  }
+  function orientHand(side, fingerDir, palmDir) {
+    const ha = N(`${side}Hand`), f = () => wpos(`${side}MiddleProximal`).sub(wpos(`${side}Hand`)).normalize();
+    rotW(ha, new THREE.Quaternion().setFromUnitVectors(f(), fingerDir));
+    const pn = () => { const k = wpos(`${side}LittleProximal`).sub(wpos(`${side}IndexProximal`)); const n = f().cross(k).normalize(); return side === 'left' ? n.negate() : n; };
+    const cur = pn(), want = palmDir.clone().sub(fingerDir.clone().multiplyScalar(palmDir.dot(fingerDir))).normalize();
+    rotW(ha, new THREE.Quaternion().setFromAxisAngle(f(), Math.atan2(cur.clone().cross(want).dot(fingerDir), cur.dot(want))));
+  }
+  /** body landmarks in the head frame (x = her left, y up, z forward, metres) for the motion prompt */
+  function landmarks() {
+    const e = ['leftEye', 'rightEye'].map(wpos), eyes = e[0].clone().add(e[1]).multiplyScalar(0.5);
+    const L = { eyes: toHead(eyes), leftEye: toHead(e[0]), rightEye: toHead(e[1]) };
+    const eh = L.eyes; L.mouth = [eh[0], +(eh[1] - 0.045).toFixed(3), +(eh[2] + 0.005).toFixed(3)]; L.chin = [eh[0], +(eh[1] - 0.075).toFixed(3), +(eh[2] - 0.005).toFixed(3)];
+    L.leftEar = [+(eh[0] + 0.075).toFixed(3), +(eh[1] - 0.005).toFixed(3), +(eh[2] - 0.06).toFixed(3)]; L.rightEar = [+(eh[0] - 0.075).toFixed(3), L.leftEar[1], L.leftEar[2]];
+    for (const n of ['neck', 'chest', 'hips', 'leftShoulder', 'rightShoulder', 'leftUpperArm', 'rightUpperArm', 'leftHand', 'rightHand']) L[n] = toHead(wpos(n));
+    return L;
+  }
+  async function solveSpec(spec, base0 = { sliders: { ...val }, fine: JSON.parse(JSON.stringify(fine)) }) {
+    const keys = [], E = window.editor;
+    for (const k of spec.keys || []) {
+      Object.assign(val, base0.sliders, k.sliders || {}); fine = JSON.parse(JSON.stringify(base0.fine)); E.hold = false; await tick(); E.hold = true; await tick();
+      const touched = new Set();
+      for (const g of k.arms || []) {
+        const side = g.side === 'left' ? 'left' : 'right';
+        const T = fromHead(g.headPoint), pole = g.poleHead ? fromHead(g.poleHead) : wpos(`${side}UpperArm`).add(new THREE.Vector3(0, -1, -0.3));
+        reach(side, T, pole); touched.add(`${side}UpperArm`).add(`${side}LowerArm`);
+        if (g.finger) { orientHand(side, dirHead(g.finger), dirHead(g.palm || [0, 0, 1])); touched.add(`${side}Hand`); }
+      }
+      const bp = basePose(), f2 = JSON.parse(JSON.stringify(base0.fine)), eu = new THREE.Euler();
+      for (const bn of touched) { eu.setFromQuaternion(N(bn).quaternion, 'XYZ'); const bs = bp[bn] || [0, 0, 0];
+        f2[bn] = [eu.x, eu.y, eu.z].map((r, a) => Math.round((AX[a] * THREE.MathUtils.radToDeg(r) - bs[a]) * 10) / 10); }
+      for (const [bn, d] of Object.entries(k.add || {})) { f2[bn] ||= [0, 0, 0]; d.forEach((x, a) => { f2[bn][a] += x; }); }
+      keys.push({ t: k.t, ease: k.ease || '平滑', state: { sliders: { ...val }, fine: f2 } });
+    }
+    Object.assign(val, base0.sliders); fine = base0.fine; E.hold = false; window.editor.sync?.(); showFine();
+    return keys;
+  }
+  /** stills of given key states from an upper-body camera (for the AI self-check) */
+  async function keyShots(states) {
+    const E = window.editor, saved = { sliders: { ...val }, fine }, cp = camera.position.clone(), ct = orbit.target.clone();
+    const h = wpos('head'); camera.position.set(h.x + 0.05, h.y - 0.1, h.z + 1.6); orbit.target.set(h.x, h.y - 0.22, h.z); orbit.update();
+    const shots = [];
+    for (const st of states) { Object.assign(val, st.sliders); fine = st.fine; await tick(); await tick(); renderer.render(scene, camera); shots.push(renderer.domElement.toDataURL('image/jpeg', 0.8)); }
+    Object.assign(val, saved.sliders); fine = saved.fine; camera.position.copy(cp); orbit.target.copy(ct); orbit.update(); await tick();
+    return shots;
+  }
   const motion = createMotion({ el, box: tabs.motion, status: m => { status.textContent = m; },
+    ai: { solve: solveSpec, landmarks, shots: keyShots, sliderNames: Object.fromEntries(Object.entries(SLIDERS).map(([k, s]) => [k, `${s.group} ${s.label} (${s.min}..${s.max}${s.unit}, default ${s.def})`])) },
     snapshot: () => ({ sliders: { ...val }, fine: JSON.parse(JSON.stringify(fine)) }),
     restore: st => load({ sliders: st.sliders, fine: JSON.parse(JSON.stringify(st.fine || {})) }),
     poseOf: st => fullPose({ ...val, ...st.sliders }, st.fine || {}) });
@@ -269,10 +336,12 @@ async function main(modelBuffer) {
   const clock = new THREE.Clock(); let lastSave = 0;
   renderer.setAnimationLoop(() => {
     const dt = Math.min(clock.getDelta(), 0.05); t += dt;
-    apply(dt); app.beforeUpdate(); vrm.update(dt); app.afterUpdate(); renderer.render(scene, camera);
+    if (!window.editor?.hold) apply(dt); app.beforeUpdate(); vrm.update(dt); app.afterUpdate(); renderer.render(scene, camera);
     if (t - lastSave > 1) { lastSave = t; save(); }
   });
-  window.editor = { vrm, val, get fine() { return fine; }, toJSON, select, app, motionJSON: () => motion.toJSON() };
+  // scripting API (11-02): an agent can read the base pose, write per-bone offsets and hold the pose while it solves
+  window.editor = { vrm, val, get fine() { return fine; }, toJSON, select, app, motion, motionJSON: () => motion.toJSON(),
+    base: () => basePose(), pose: () => fullPose(), setFine: f => { fine = f; showFine(); }, hold: false, AX, sync: () => { for (const k of Object.keys(inputs)) { inputs[k].r.value = val[k]; inputs[k].show(); } } };
   stop = () => { renderer.setAnimationLoop(null); gizmo.detach(); gizmo.dispose(); orbit.dispose(); renderer.dispose(); removeEventListener('resize', resize); };
   status.textContent = pack ? `已载入预设包：${pack.name}` : '';
 }
