@@ -175,7 +175,10 @@ export function createAppearance({ vrm, pack, el, tabs }) {
 
   return {
     /** before vrm.update: expression weights */
-    beforeUpdate() { if (em) for (const [n, w] of Object.entries(state.expr)) em.setValue(n, w); },
+    beforeUpdate(override) {   // override: a playing motion's expression weights (the sliders' own values come back after)
+      if (!em) return;
+      for (const n of new Set([...Object.keys(state.expr), ...Object.keys(override || {})])) em.setValue(n, override ? (override[n] ?? 0) : (state.expr[n] ?? 0));
+    },
     /** after vrm.update (the expression manager rewrites bound morphs): shapes and author face presets */
     afterUpdate() {
       for (const [n, ks] of Object.entries(state.morphs)) for (const o of byName.get(n) || []) {

@@ -11,6 +11,8 @@ import numpy as np
 
 vrm_path, pose_path, out = sys.argv[1:4]; secs = float(sys.argv[4]) if len(sys.argv) > 4 else 8.0
 P = json.load(open(pose_path))
+FRAMES = P.get('frames')   # the editor's baked motion (30 fps, spline + collision): use it as is
+if FRAMES: P['keys'] = [{'t': f['t'], 'ease': '线性', 'pose': f['pose'], 'hips_offset_cm': f.get('hips_offset_cm', [0, 0]), 'expr': f.get('expr', {})} for f in FRAMES]
 KEYS = P.get('keys')
 BREATH0 = {'spine': [0.3, 0, 0], 'chest': [0.6, 0, 0], 'neck': [-0.5, 0, 0], 'head': [-0.3, 0, 0], 'leftShoulder': [0, 0, 0.8], 'rightShoulder': [0, 0, -0.8]}
 if KEYS:   # motion: length from the keys, the editor's breathing
@@ -104,9 +106,23 @@ hp = [nodes[idx['hips']]['translation'][k] for k in range(3)]
 pos = [[hp[0] + (hips_x(t) if KEYS else ox) / 100 + hx / 100 * math.sin(2 * math.pi * t / ss), hp[1], hp[2] + oz / 100 + hz / 100 * math.sin(2 * math.pi * t / ss + 1)] for t in ts]
 samplers.append({'input': t_acc, 'output': accessor(np.array(pos), 'VEC3'), 'interpolation': 'LINEAR'})
 channels.append({'sampler': len(samplers) - 1, 'target': {'node': idx['hips'], 'path': 'translation'}})
+# expressions (VRMC_vrm_animation: one node per expression, weight = translation.x)
+expr_names = sorted({n for k in (KEYS or []) for n in (k.get('expr') or {})})
+PRESETS = {'happy', 'angry', 'sad', 'relaxed', 'surprised', 'aa', 'ih', 'ou', 'ee', 'oh', 'blink', 'blinkLeft', 'blinkRight', 'lookUp', 'lookDown', 'lookLeft', 'lookRight', 'neutral'}
+expr_ext = {'preset': {}, 'custom': {}}
+for n in expr_names:
+    nodes.append({'name': f'expr_{n}'}); ni = len(nodes) - 1
+    vals = []
+    for t in ts:
+        ka, kb, u = key_at(t); a = (KEYS[ka].get('expr') or {}).get(n, 0); b = (KEYS[kb].get('expr') or {}).get(n, 0); vals.append([a + (b - a) * u, 0, 0])
+    samplers.append({'input': t_acc, 'output': accessor(np.array(vals), 'VEC3'), 'interpolation': 'LINEAR'})
+    channels.append({'sampler': len(samplers) - 1, 'target': {'node': ni, 'path': 'translation'}})
+    expr_ext['preset' if n in PRESETS else 'custom'][n] = {'node': ni}
+anim_ext = {'specVersion': '1.0', 'humanoid': {'humanBones': {b: {'node': idx[b]} for b in order}}}
+if expr_names: anim_ext['expressions'] = {k: v for k, v in expr_ext.items() if v}
 J = {'asset': {'version': '2.0', 'generator': 'pose_vrma.py'}, 'extensionsUsed': ['VRMC_vrm_animation'],
-     'extensions': {'VRMC_vrm_animation': {'specVersion': '1.0', 'humanoid': {'humanBones': {b: {'node': idx[b]} for b in order}}}},
-     'scene': 0, 'scenes': [{'nodes': [idx['hips']]}], 'nodes': nodes, 'animations': [{'name': 'idle', 'samplers': samplers, 'channels': channels}],
+     'extensions': {'VRMC_vrm_animation': anim_ext},
+     'scene': 0, 'scenes': [{'nodes': [idx['hips']] + [i for i, n in enumerate(nodes) if n['name'].startswith('expr_')]}], 'nodes': nodes, 'animations': [{'name': 'idle', 'samplers': samplers, 'channels': channels}],
      'accessors': acc, 'bufferViews': views, 'buffers': [{'byteLength': len(bin_)}]}
 jb = json.dumps(J, separators=(',', ':')).encode(); jb += b' ' * (-len(jb) % 4); bin_ += b'\0' * (-len(bin_) % 4)
 open(out, 'wb').write(struct.pack('<III', 0x46546C67, 2, 28 + len(jb) + len(bin_)) + struct.pack('<II', len(jb), 0x4E4F534A) + jb

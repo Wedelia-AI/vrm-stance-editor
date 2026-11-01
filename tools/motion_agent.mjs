@@ -16,10 +16,18 @@ const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '
 const FORMAT = `You write key poses for a short habitual motion of an anime girl standing in an idle stance. Reply with ONLY a JSON
 object: {"name": "<snake_case>", "note": "<one short Chinese sentence on what you did>", "keys": [ ... ]}.
 
-Each key: {"t": seconds, "ease": "平滑" | "缓入缓出" | "线性", "arms": [goal...], "sliders": {name: value}, "add": {bone: [x, y, z]}}.
+Each key: {"t": seconds, "ease": "平滑" | "停住" | "线性", "arms": [goal...], "hands": {"right": preset, "left": preset},
+"sliders": {name: value}, "add": {bone: [x, y, z]}, "expr": {expression: weight}}.
+- The motion is played as a smooth spline through the keys: "平滑" = pass through this key without stopping (use for
+  travelling keys), "停住" = come to rest on this key (a hold, the end of a reach), "线性" = constant speed. The editor
+  adds overlapping action (hands trail the arm, head follows) and pushes hands/elbows out of the body, so give clean
+  intent, not micro-corrections. Prefer few keys: a reach is usually start -> one or two travelling keys -> a 停住 key.
 - The first key must be {"t": 0} (the stance as is) and the last key must also be a bare stance key (the motion returns),
-  e.g. {"t": 2.8, "ease": "缓入缓出"}. Total length 1.5-4 s. Keys 0.2-0.6 s apart; add in-between keys so a hand travels
-  around the body instead of through it (e.g. come down in front of the chest before returning).
+  e.g. {"t": 2.8, "ease": "停住"}. Total length 1.5-4 s. Give anticipation and settle time: a hold of 0.3-0.6 s at the
+  goal reads better than constant movement. Add a travelling key so a hand goes around the body, not through it.
+- hands: named hand shapes per side, applied before the finger sliders: see the hand preset list below.
+- expr: VRM expression weights 0..1 for that key (interpolated like the pose), keep them subtle (0.2-0.6) and in
+  character, e.g. a shy tuck {"happy": 0.35} with the head down a little; available: see the expression list below. Blinks are automatic.
 - arm goal: {"side": "right" | "left", "headPoint": [x, y, z], "finger": [x, y, z], "palm": [x, y, z], "poleHead": [x, y, z]}.
   headPoint = where the WRIST goes, in the HEAD frame: metres, x = her own left, y = up, z = forward (out of her face).
   The fingers extend ~0.08 m beyond the wrist along "finger"; "palm" = the direction the palm faces; "poleHead" = a
@@ -53,12 +61,26 @@ function claude(prompt, extraArgs = []) {
     let out = '', err = ''; p.stdout.on('data', d => { out += d; }); p.stderr.on('data', d => { err += d; });
     p.on('close', code => {
       if (code !== 0) return reject(new Error(`claude exit ${code}: ${err.slice(0, 300)}`));
-      try { const r = JSON.parse(out).result || ''; const m = r.match(/\{[\s\S]*\}/); resolve(JSON.parse(m[0])); }
-      catch (e) { reject(new Error('could not parse the reply: ' + out.slice(0, 300))); }
+      try { resolve(extractJSON(JSON.parse(out).result || '')); }
+      catch (e) { reject(new Error('could not parse the reply: ' + String(e.message).slice(0, 200))); }
     });
     p.stdin.end(prompt);
   });
 }
+// the reply may wrap the JSON in a fenced block or add prose around it: take the first balanced {...} that parses
+function extractJSON(text) {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/); if (fenced) { try { return JSON.parse(fenced[1]); } catch {} }
+  for (let i = text.indexOf('{'); i >= 0; i = text.indexOf('{', i + 1)) {
+    let depth = 0, inStr = false, esc = false;
+    for (let j = i; j < text.length; j++) {
+      const c = text[j];
+      if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+      if (c === '"') inStr = true; else if (c === '{') depth++; else if (c === '}' && --depth === 0) { try { return JSON.parse(text.slice(i, j + 1)); } catch { break; } }
+    }
+  }
+  throw new Error('no JSON object in: ' + text.slice(0, 160));
+}
+async function withRetry(fn) { try { return await fn(); } catch (e) { console.error('retry after:', e.message); return await fn(); } }
 function validate(spec) {
   if (!spec || !Array.isArray(spec.keys) || spec.keys.length < 2) throw new Error('spec without keys');
   spec.keys.sort((a, b) => a.t - b.t);
@@ -67,11 +89,12 @@ function validate(spec) {
   return spec;
 }
 const context = b => `Body landmarks in the head frame (metres): ${JSON.stringify(b.landmarks)}
+Hand presets: ${JSON.stringify(b.handPresets || [])}; expressions: ${JSON.stringify(b.expressions || [])}
 Stance sliders you may change: ${JSON.stringify(b.sliders)}
 Current stance slider values: ${JSON.stringify(b.stance?.sliders || {})}`;
 
 async function generate(b) {
-  return validate(await claude(`${FORMAT}\n\n${EXAMPLES}\n\n${context(b)}\n\nMotion to make: ${b.description}`));
+  return withRetry(async () => validate(await claude(`${FORMAT}\n\n${EXAMPLES}\n\n${context(b)}\n\nMotion to make: ${b.description}`)));
 }
 async function refine(b) {
   const dir = await mkdtemp(join(tmpdir(), 'motion-'));
@@ -79,15 +102,18 @@ async function refine(b) {
     const files = [];
     for (const [i, d] of (b.shots || []).entries()) { const f = join(dir, `key${i}.jpg`); await writeFile(f, Buffer.from(d.split(',')[1], 'base64')); files.push(f); }
     const prompt = `${FORMAT}\n\n${context(b)}\n\nThe motion "${b.description}" was generated as this spec:\n${JSON.stringify(b.spec)}\n\n` +
-      `Stills of each key in order (front view, upper body), read them: ${files.join(', ')}\n` +
-      `Check each key against the description: is the hand where it should be (touching, not inside the head/hair/body, visible),` +
-      ` are the fingers and palm right, does the head follow naturally, does the hand path avoid the body? Return the corrected` +
+      `Stills of the played motion at t = ${JSON.stringify(b.shotTimes || [])} s (front view, upper body), read them: ${files.join(', ')}\n` +
+      `Check them against the description: is the hand where it should be (touching, not inside the head/hair/body, visible),` +
+      ` are the fingers and palm right, does the head and expression follow naturally, is the timing believable? Return the corrected` +
       ` full spec (same JSON format), with "note" saying in one Chinese sentence what you changed.`;
-    return validate(await claude(prompt, ['--allowedTools', 'Read', '--add-dir', dir]));
+    return await withRetry(async () => validate(await claude(prompt, ['--allowedTools', 'Read', '--add-dir', dir])));
   } finally { await rm(dir, { recursive: true, force: true }); }
 }
 
 createServer(async (req, res) => {
+  // pages served from another origin (a local copy of the editor) may call the API
+  res.setHeader('access-control-allow-origin', '*'); res.setHeader('access-control-allow-headers', 'content-type'); res.setHeader('access-control-allow-methods', 'GET, POST, OPTIONS');
+  if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
   try {
     if (req.method === 'POST' && req.url.startsWith('/api/motion')) {
       let body = ''; for await (const c of req) body += c;

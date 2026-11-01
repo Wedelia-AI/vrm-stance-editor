@@ -8,6 +8,7 @@ import { TransformControls } from 'three/examples/jsm/controls/TransformControls
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { createAppearance } from './appearance.js';
 import { createMotion } from './motion.js';
+import { addHandColliders } from './handcolliders.js';
 
 const readFile = name => new Promise((resolve, reject) => {
   const x = new XMLHttpRequest(); x.open('GET', name); x.responseType = 'arraybuffer';
@@ -62,6 +63,8 @@ for (const [p, side] of [['l', '左'], ['r', '右']]) {
 const HAND_PRESETS = {   // finger % (thumb, index, middle, ring, little) + thumb fold-in %
   '自然': [0, 100, 100, 100, 100, 0], '放松张开': [0, 25, 25, 30, 35, 0], '握拳': [100, 550, 550, 550, 550, 100],
   '比V': [100, 10, 10, 550, 550, 100], '指人': [100, 10, 550, 550, 550, 80],
+  'OK': [100, 330, 20, 25, 30, 70], '单手比心': [60, 200, 550, 550, 550, 40], '半边爱心': [30, 260, 260, 270, 280, 0],
+  '猫爪': [80, 380, 380, 380, 380, 30], '托腮': [0, 150, 150, 170, 190, 0], '捏': [100, 300, 200, 250, 300, 80],
 };
 const SPREAD = { Index: -4, Middle: 0, Ring: 3, Little: 6 };
 const THUMB = 15;
@@ -92,6 +95,7 @@ async function main(modelBuffer) {
   VRMUtils.removeUnnecessaryVertices(vrm.scene); vrm.scene.traverse(o => { o.frustumCulled = false; });
   // VRM 0.x faces -Z with the character's left on -X: turn it round, and mirror the pose's X/Z rotation axes
   const vrm0 = vrm.meta?.metaVersion === '0'; if (vrm0) VRMUtils.rotateVRM0(vrm);
+  addHandColliders(vrm);   // hands push hair / clothes springs aside
   const AX = vrm0 ? [-1, 1, -1] : [1, 1, 1];
   scene.add(vrm.scene);
   const N = n => vrm.humanoid.getNormalizedBoneNode(n);
@@ -133,10 +137,10 @@ async function main(modelBuffer) {
     return P;
   };
   const D = THREE.MathUtils.degToRad, e = new THREE.Euler();
-  const bq = new THREE.Quaternion();
+  const bq = new THREE.Quaternion(); let lastExpr = null;
   const apply = dt => {
     const bs = Math.sin(2 * Math.PI * t / 4.2), ss = Math.sin(2 * Math.PI * t / 10);
-    const M = motion?.playing ? motion.sample(dt, AX) : null, P = M ? null : fullPose();
+    const M = motion?.playing ? motion.sample(dt, AX) : null, P = M ? null : fullPose(); lastExpr = M?.expr || null;
     for (const b of Object.keys(vrm.humanoid.humanBones)) {
       const node = N(b); if (!node || (gizmo.dragging && node === selected?.node)) continue;
       const br = breathe ? (BREATH[b] || [0, 0, 0]) : [0, 0, 0], sw = breathe ? (SWAY[b] || [0, 0, 0]) : [0, 0, 0];
@@ -278,6 +282,10 @@ async function main(modelBuffer) {
     for (const k of spec.keys || []) {
       Object.assign(val, base0.sliders, k.sliders || {}); fine = JSON.parse(JSON.stringify(base0.fine)); E.hold = false; await tick(); E.hold = true; await tick();
       const touched = new Set();
+      // named hand shapes per side ({"right": "比V"}) set that hand's finger sliders
+      for (const [sd, name] of Object.entries(k.hands || {})) { const v = HAND_PRESETS[name], p = sd === 'left' ? 'l' : 'r';
+        if (v) { FINGERS.forEach((f, i) => { val[`${p}F${f}`] = v[i]; }); val[`${p}ThumbIn`] = v[5]; } }
+      if (k.hands) { E.hold = false; await tick(); E.hold = true; await tick(); }
       for (const g of k.arms || []) {
         const side = g.side === 'left' ? 'left' : 'right';
         const T = fromHead(g.headPoint), pole = g.poleHead ? fromHead(g.poleHead) : wpos(`${side}UpperArm`).add(new THREE.Vector3(0, -1, -0.3));
@@ -288,12 +296,142 @@ async function main(modelBuffer) {
       for (const bn of touched) { eu.setFromQuaternion(N(bn).quaternion, 'XYZ'); const bs = bp[bn] || [0, 0, 0];
         f2[bn] = [eu.x, eu.y, eu.z].map((r, a) => Math.round((AX[a] * THREE.MathUtils.radToDeg(r) - bs[a]) * 10) / 10); }
       for (const [bn, d] of Object.entries(k.add || {})) { f2[bn] ||= [0, 0, 0]; d.forEach((x, a) => { f2[bn][a] += x; }); }
-      keys.push({ t: k.t, ease: k.ease || '平滑', state: { sliders: { ...val }, fine: f2 } });
+      keys.push({ t: k.t, ease: k.ease || '平滑', state: { sliders: { ...val }, fine: f2, expr: k.expr || {} } });
     }
     Object.assign(val, base0.sliders); fine = base0.fine; E.hold = false; window.editor.sync?.(); showFine();
     return keys;
   }
   /** stills of given key states from an upper-body camera (for the AI self-check) */
+  // ---- motion baking (11-02, Jack: AI motions stuttered and clipped through the body): every 1/30 s
+  // 1. C1 spline through the key poses (Catmull-Rom on quaternions; a key marked 停住 stops there, the ends ease),
+  // 2. overlapping action: hands/fingers trail the upper arm, chest/neck/head follow a little later,
+  // 3. collision: wrist, finger tips and elbow are pushed out of the author's body colliders and a head sphere,
+  //    the arm re-solved with IK, so the hand travels around the body instead of through it.
+  const STOP = new Set(['停住', '缓入缓出']);
+  const LAG = b => /Proximal|Intermediate|Distal|Metacarpal/.test(b) ? 0.09 : /Hand$/.test(b) ? 0.06 : /LowerArm$/.test(b) ? 0.03
+    : b === 'head' ? 0.08 : b === 'neck' ? 0.06 : b === 'chest' || b === 'upperChest' ? 0.05 : 0;
+  const ARM_BONES = side => new Set([`${side}UpperArm`, `${side}LowerArm`, `${side}Hand`].map(b => vrm.humanoid.getRawBoneNode(b)).filter(Boolean));
+  function bodyColliders() {   // the author's spring colliders minus the arms' own, plus a head sphere (hair included)
+    const arms = new Set([...ARM_BONES('left'), ...ARM_BONES('right')]), out = [];
+    for (const c of vrm.springBoneManager?.colliders || []) {
+      let o = c.parent, onArm = false; while (o) { if (arms.has(o)) { onArm = true; break; } o = o.parent; }
+      if (!onArm && !/leg|foot|knee/i.test(c.parent?.name || '')) out.push(c);
+    }
+    return out;
+  }
+  const pushOut = (P, cols, head, margin = 0.012, shs = []) => {   // total push vector to move point P out of the body
+    const push = new THREE.Vector3(), d = new THREE.Vector3();
+    for (const sh of shs) push.add(shellPush(P.clone().add(push), sh));
+    for (const c of cols) {
+      c.updateWorldMatrix(true, false);
+      const dist = c.shape.calculateCollision(c.colliderMatrix, P.clone().add(push), margin, d);
+      if (dist < 0) push.addScaledVector(d, -dist);
+    }
+    const hc = head.c, r = head.r + margin, v = P.clone().add(push).sub(hc), l = v.length();
+    if (l < r) push.addScaledVector(v.normalize(), r - l);
+    return push;
+  };
+  // Outer shells from the model's own meshes (clothes and hair included): vertices weighted to the torso / head, in
+  // that bone's frame, sliced every 3 cm along its up axis, 24 angular sectors, max radius per sector.
+  const SLICE = 0.03, SECT = 24;
+  function buildShell(boneName, pick, yMin = -Infinity) {
+    const ref = N(boneName), raw = vrm.humanoid.getRawBoneNode(boneName); vrm.scene.updateMatrixWorld(true);
+    const inv = ref.matrixWorld.clone().invert(), v = new THREE.Vector3(), slices = new Map();
+    vrm.scene.traverse(o => {
+      if (!o.isSkinnedMesh || !o.visible) return;
+      const g = o.geometry, si = g.attributes.skinIndex, sw = g.attributes.skinWeight, bones = o.skeleton.bones;
+      for (let i = 0; i < g.attributes.position.count; i += 2) {
+        let best = 0, bi = 0; for (let k = 0; k < 4; k++) if (sw.getComponent(i, k) > best) { best = sw.getComponent(i, k); bi = si.getComponent(i, k); }
+        if (!pick(bones[bi], raw)) continue;
+        o.getVertexPosition(i, v); v.applyMatrix4(o.matrixWorld).applyMatrix4(inv); if (v.y < yMin) continue;
+        const yi = Math.floor(v.y / SLICE); let sl = slices.get(yi); if (!sl) slices.set(yi, sl = new Float32Array(SECT));
+        const a = Math.floor(((Math.atan2(v.z, v.x) + Math.PI) / (2 * Math.PI)) * SECT) % SECT; sl[a] = Math.max(sl[a], Math.hypot(v.x, v.z));
+      }
+    });
+    return { ref, slices };
+  }
+  const under = (b, root) => { while (b) { if (b === root) return true; b = b.parent; } return false; };
+  const ARMS = () => ['left', 'right'].flatMap(sd => [`${sd}Shoulder`, `${sd}UpperArm`]).map(b => vrm.humanoid.getRawBoneNode(b)).filter(Boolean);
+  function shells() {   // torso (chest frame): everything under the hips except arms and legs; head: everything under the head
+    const arms = ARMS(), legs = ['leftUpperLeg', 'rightUpperLeg'].map(b => vrm.humanoid.getRawBoneNode(b)).filter(Boolean);
+    const soft = b => { while (b) { if (/skirt|tail|ribbon|belt/i.test(b.name)) return true; b = b.parent; } return false; };
+    return [buildShell('chest', (b, r) => under(b, vrm.humanoid.getRawBoneNode('hips')) && !under(b, vrm.humanoid.getRawBoneNode('head')) && !arms.some(a => under(b, a)) && !legs.some(l => under(b, l)) && !soft(b)),
+            buildShell('head', (b, r) => under(b, r), -0.03)];   // head + hair down to the chin; long hair / braids below do not block
+  }
+  function shellPush(P, sh, margin = 0.015) {   // push vector taking P out of a shell (zero when outside)
+    const inv = sh.ref.matrixWorld.clone().invert(), l = P.clone().applyMatrix4(inv), sl = sh.slices.get(Math.floor(l.y / SLICE));
+    if (!sl) return new THREE.Vector3();
+    const a = Math.floor(((Math.atan2(l.z, l.x) + Math.PI) / (2 * Math.PI)) * SECT) % SECT;
+    const R = Math.max(sl[a], sl[(a + 1) % SECT], sl[(a + SECT - 1) % SECT]), r = Math.hypot(l.x, l.z);
+    if (R === 0 || r >= R + margin) return new THREE.Vector3();
+    const dir = r > 1e-4 ? new THREE.Vector3(l.x / r, 0, l.z / r) : new THREE.Vector3(0, 0, 1);
+    const out = l.clone().add(dir.multiplyScalar(R + margin - r)).applyMatrix4(sh.ref.matrixWorld);
+    return out.sub(P);
+  }
+  function headSphere() { const h = wpos('head'), up = new THREE.Vector3(0, 1, 0).applyQuaternion(N('head').getWorldQuaternion(new THREE.Quaternion()));
+    return { c: h.clone().addScaledVector(up, 0.085), r: 0.105 }; }
+  const qPose = P => Object.fromEntries(Object.entries(P).map(([b, p]) => [b, new THREE.Quaternion().setFromEuler(new THREE.Euler(AX[0] * D(p[0]), AX[1] * D(p[1]), AX[2] * D(p[2]), 'XYZ'))]));
+  function splineAt(K, Q, b, t) {   // Catmull-Rom on quaternions (component-wise, hemisphere-aligned, normalised)
+    const n = K.length; if (t <= K[0].t) return Q[0][b].clone(); if (t >= K[n - 1].t) return Q[n - 1][b].clone();
+    let i = 0; while (i < n - 2 && K[i + 1].t <= t) i++;
+    const t0 = K[i].t, t1 = K[i + 1].t, h = t1 - t0, u = (t - t0) / h;
+    const p0 = Q[i][b], p1 = Q[i + 1][b].clone(); if (p0.dot(p1) < 0) p1.set(-p1.x, -p1.y, -p1.z, -p1.w);
+    if (K[i + 1].ease === '线性') return p0.clone().slerp(p1, u);
+    const tan = j => { if (j === 0 || j === n - 1 || STOP.has(K[j].ease)) return [0, 0, 0, 0];
+      const a = Q[j - 1][b], c = Q[j + 1][b].clone(), m = Q[j][b]; if (m.dot(c) < 0) c.set(-c.x, -c.y, -c.z, -c.w);
+      const a2 = m.dot(a) < 0 ? [-a.x, -a.y, -a.z, -a.w] : [a.x, a.y, a.z, a.w], dt = K[j + 1].t - K[j - 1].t;
+      return [(c.x - a2[0]) / dt, (c.y - a2[1]) / dt, (c.z - a2[2]) / dt, (c.w - a2[3]) / dt]; };
+    const m0 = tan(i), m1 = tan(i + 1), u2 = u * u, u3 = u2 * u, h00 = 2 * u3 - 3 * u2 + 1, h10 = u3 - 2 * u2 + u, h01 = -2 * u3 + 3 * u2, h11 = u3 - u2;
+    const A = [p0.x, p0.y, p0.z, p0.w], B = [p1.x, p1.y, p1.z, p1.w];
+    const r = A.map((x, k) => h00 * x + h10 * h * m0[k] + h01 * B[k] + h11 * h * m1[k]);
+    return new THREE.Quaternion(...r).normalize();
+  }
+  async function bakeMotion(keys, fps = 30) {
+    if (keys.length < 2) return null;
+    const E = window.editor, K = keys.map(k => ({ t: k.t, ease: k.ease })), Q = keys.map(k => qPose(fullPose({ ...val, ...k.state.sliders }, k.state.fine || {})));
+    const bones = [...new Set(Q.flatMap(q => Object.keys(q)))]; for (const q of Q) for (const b of bones) q[b] ||= new THREE.Quaternion();
+    const hipsW = keys.map(k => (k.state.sliders.weight ?? val.weight) || 0), exprs = keys.map(k => k.state.expr || {});
+    const exprNames = [...new Set(exprs.flatMap(x => Object.keys(x)))];
+    const T = keys[keys.length - 1].t, frames = [], cols = bodyColliders(); E.hold = true;
+    // shells from the first key's pose (arms at rest), so the hands are not part of them
+    for (const b of bones) { const n = N(b); if (n) n.quaternion.copy(Q[0][b]); }
+    const shs = shells(); let pushed = 0, rest0 = null, residual = 0, worstCm = 0;
+    for (let f = 0; f <= Math.round(T * fps); f++) {
+      const t = f / fps;
+      for (const b of bones) { const n = N(b); if (n) n.quaternion.copy(splineAt(K, Q, b, Math.max(0, t - LAG(b)))); }
+      // hips weight / expressions: same spline timing as the keys, scalar Hermite with zero end tangents
+      let i = 0; while (i < keys.length - 2 && keys[i + 1].t <= t) i++;
+      const u = THREE.MathUtils.clamp((t - keys[i].t) / Math.max(1e-6, keys[i + 1].t - keys[i].t), 0, 1), s = u * u * (3 - 2 * u);
+      hips.position.copy(hips0); hips.position.x += AX[0] * (hipsW[i] + (hipsW[i + 1] - hipsW[i]) * s) / 100;
+      vrm.scene.updateMatrixWorld(true);
+      const head = headSphere();
+      if (f === 0) rest0 = { left: wpos('leftHand'), right: wpos('rightHand') };
+      for (const side of ['left', 'right']) for (let it = 0; it < 3; it++) {
+        if (wpos(`${side}Hand`).distanceTo(rest0[side]) < 0.05) break;   // an arm still at its stance keeps the stance as authored
+        const pts = [`${side}Hand`, `${side}MiddleDistal`, `${side}IndexDistal`, `${side}LowerArm`].map(wpos);
+        const pushes = pts.map(P => pushOut(P, cols, head, 0.012, shs)); const worst = pushes.reduce((a, p) => (p.length() > a.length() ? p : a));
+        if (worst.length() < 1e-4) break;
+        if (it === 0) pushed++;
+        const elbowPush = pushes[3], handQ = N(`${side}Hand`).getWorldQuaternion(new THREE.Quaternion());
+        const target = pts[0].clone().add(worst), pole = pts[3].clone().add(elbowPush).addScaledVector(elbowPush.clone().normalize(), elbowPush.length() > 1e-4 ? 0.05 : 0);
+        if (elbowPush.length() < 1e-4) pole.add(new THREE.Vector3(side === 'left' ? 0.05 : -0.05, 0, 0).multiplyScalar(AX[0]));
+        reach(side, target, pole);
+        const ha = N(`${side}Hand`), pq = ha.parent.getWorldQuaternion(new THREE.Quaternion()); ha.quaternion.copy(pq.invert().multiply(handQ)); vrm.scene.updateMatrixWorld(true);
+      }
+      // residual check (after the fixes): deepest point still inside the body / head shells on a moving arm
+      for (const side of ['left', 'right']) { if (wpos(`${side}Hand`).distanceTo(rest0[side]) < 0.05) continue;
+        for (const n of [`${side}Hand`, `${side}MiddleDistal`, `${side}IndexDistal`, `${side}LowerArm`]) {
+          const d = pushOut(wpos(n), cols, headSphere(), 0, shs).length(); if (d > 0.005) { residual++; worstCm = Math.max(worstCm, d * 100); } } }
+      const pose = {}, eu = new THREE.Euler();
+      for (const b of bones) { const n = N(b); if (!n) continue; eu.setFromQuaternion(n.quaternion, 'XYZ'); pose[b] = [eu.x, eu.y, eu.z].map((r, a) => Math.round(AX[a] * THREE.MathUtils.radToDeg(r) * 100) / 100); }
+      const ex = {}; for (const e of exprNames) { const a = exprs[i][e] || 0, c = exprs[i + 1][e] || 0; ex[e] = Math.round((a + (c - a) * s) * 1000) / 1000; }
+      frames.push({ t: Math.round(t * 1000) / 1000, pose, hips_offset_cm: [(hipsW[i] + (hipsW[i + 1] - hipsW[i]) * s), 0], expr: ex });
+    }
+    E.hold = false; hips.position.copy(hips0);
+    frames.pushed = pushed;   // frames where a hand / elbow had to be moved out of the body
+    frames.residual = residual; frames.worstCm = +worstCm.toFixed(1);
+    return frames;
+  }
   async function keyShots(states) {
     const E = window.editor, saved = { sliders: { ...val }, fine }, cp = camera.position.clone(), ct = orbit.target.clone();
     const h = wpos('head'); camera.position.set(h.x + 0.05, h.y - 0.1, h.z + 1.6); orbit.target.set(h.x, h.y - 0.22, h.z); orbit.update();
@@ -302,10 +440,23 @@ async function main(modelBuffer) {
     Object.assign(val, saved.sliders); fine = saved.fine; camera.position.copy(cp); orbit.target.copy(ct); orbit.update(); await tick();
     return shots;
   }
-  const motion = createMotion({ el, box: tabs.motion, status: m => { status.textContent = m; },
-    ai: { solve: solveSpec, landmarks, shots: keyShots, sliderNames: Object.fromEntries(Object.entries(SLIDERS).map(([k, s]) => [k, `${s.group} ${s.label} (${s.min}..${s.max}${s.unit}, default ${s.def})`])) },
-    snapshot: () => ({ sliders: { ...val }, fine: JSON.parse(JSON.stringify(fine)) }),
-    restore: st => load({ sliders: st.sliders, fine: JSON.parse(JSON.stringify(st.fine || {})) }),
+  /** stills of six evenly spaced baked frames (the AI self-check looks at the path, not only the keys) */
+  async function frameShots(frames) {
+    const E = window.editor, cp = camera.position.clone(), ct = orbit.target.clone(), h = wpos('head');
+    camera.position.set(h.x + 0.05, h.y - 0.1, h.z + 1.6); orbit.target.set(h.x, h.y - 0.22, h.z); orbit.update();
+    const idx = [...new Set([0.15, 0.3, 0.45, 0.6, 0.75, 0.9].map(f => Math.round(f * (frames.length - 1))))], images = [], times = [];
+    E.hold = true;
+    for (const i of idx) {
+      const F = frames[i]; for (const [b, p] of Object.entries(F.pose)) N(b)?.quaternion.setFromEuler(new THREE.Euler(AX[0] * D(p[0]), AX[1] * D(p[1]), AX[2] * D(p[2]), 'XYZ'));
+      app.beforeUpdate(F.expr); vrm.update(0); app.afterUpdate(); renderer.render(scene, camera); images.push(renderer.domElement.toDataURL('image/jpeg', 0.8)); times.push(F.t);
+    }
+    E.hold = false; camera.position.copy(cp); orbit.target.copy(ct); orbit.update(); await tick();
+    return { images, times };
+  }
+  const motion = createMotion({ el, box: tabs.motion, status: m => { status.textContent = m; }, bake: bakeMotion,
+    ai: { solve: solveSpec, landmarks, shots: keyShots, frameShots, handPresets: Object.keys(HAND_PRESETS), expressions: (vrm.expressionManager?.expressions || []).map(x => x.expressionName), sliderNames: Object.fromEntries(Object.entries(SLIDERS).map(([k, s]) => [k, `${s.group} ${s.label} (${s.min}..${s.max}${s.unit}, default ${s.def})`])) },
+    snapshot: () => ({ sliders: { ...val }, fine: JSON.parse(JSON.stringify(fine)), expr: { ...app.toJSON().expr } }),
+    restore: st => { load({ sliders: st.sliders, fine: JSON.parse(JSON.stringify(st.fine || {})) }); app.load({ expr: st.expr || {} }); },
     poseOf: st => fullPose({ ...val, ...st.sliders }, st.fine || {}) });
   document.getElementById('download').onclick = () => {
     const j = toJSON(), a = el('a', { href: URL.createObjectURL(new Blob([JSON.stringify(j, null, 1)], { type: 'application/json' })), download: `stance-${j.name}.json` });
@@ -336,7 +487,7 @@ async function main(modelBuffer) {
   const clock = new THREE.Clock(); let lastSave = 0;
   renderer.setAnimationLoop(() => {
     const dt = Math.min(clock.getDelta(), 0.05); t += dt;
-    if (!window.editor?.hold) apply(dt); app.beforeUpdate(); vrm.update(dt); app.afterUpdate(); renderer.render(scene, camera);
+    if (!window.editor?.hold) apply(dt); app.beforeUpdate(motion.playing ? lastExpr : null); vrm.update(dt); app.afterUpdate(); renderer.render(scene, camera);
     if (t - lastSave > 1) { lastSave = t; save(); }
   });
   // scripting API (11-02): an agent can read the base pose, write per-bone offsets and hold the pose while it solves
