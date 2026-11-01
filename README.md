@@ -12,6 +12,8 @@ exporting the pose as a looping VRMA idle.
   toe-in, weight), per-finger curl with hand presets (relaxed, open, fist, V sign, pointing), and a rotate gizmo:
   click any body part or finger and drag. Camera presets (front, three-quarter, side, back, hands, face), breathing
   preview, day / evening lighting, a reference image overlay.
+- **Motion / 动作**: small habitual motions as key poses — add a key from the current stance, pose the next one
+  (say, a hand up to the hair), set times and easing, play / loop, and save `motion-<name>.json`.
 - **Appearance / 外观**: show or hide each mesh, every morph target of the non-face meshes (lengths, socks, hair
   styles...), replace any material's texture with an image (the original alpha is kept; a baked MToon shade texture
   is re-derived so shaded areas change colour too).
@@ -39,7 +41,10 @@ resulting pose). Turn it into an idle clip with:
 python tools/pose_vrma.py model.vrm stance-<name>.json idle.vrma 10
 ```
 
-The clip holds the pose with slow breathing (chest and shoulders rise, neck counter-rotates so the head stays still)
+A saved motion converts the same way (`python tools/pose_vrma.py model.vrm motion-<name>.json habit.vrma`); its
+length is the last key's time.
+
+The idle clip holds the pose with slow breathing (chest and shoulders rise, neck counter-rotates so the head stays still)
 and a small weight shift of the hips; pin the feet in your player so they stay planted.
 
 ### Conventions

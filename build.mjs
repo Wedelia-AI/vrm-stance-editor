@@ -29,6 +29,7 @@ label input{width:100%}.v{text-align:right;color:var(--mute);font-variant-numeri
 .fine{border:1px dashed var(--line);border-radius:8px;padding:8px;margin-top:8px}.fine button{margin:6px 6px 0 0}
 .hint{color:var(--mute)}.sel{font-weight:600;margin-bottom:4px}
 .tabs{display:flex;gap:4px;position:sticky;top:0;background:var(--panel);padding:8px 0;z-index:2}.tabs button{flex:1}.tabs button.on,.chips button.on{background:var(--acc);color:#fff;border-color:var(--acc)}
+.key{display:flex;gap:4px;align-items:center;margin:4px 0;padding:4px;border:1px solid var(--line);border-radius:6px}.key.on{border-color:var(--acc);background:#fff4ef}.key button{padding:2px 6px;font-size:12px}.key select{font-size:12px}
 .chips{display:flex;flex-wrap:wrap;gap:4px;margin:4px 0}.chips button{padding:3px 8px;font-size:12px}
 label.check{grid-template-columns:20px 1fr}details{margin:4px 0}summary{cursor:pointer;color:var(--ink);padding:3px 0}select{max-width:100%}
 label span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

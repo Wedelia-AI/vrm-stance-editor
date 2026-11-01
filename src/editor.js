@@ -7,6 +7,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { createAppearance } from './appearance.js';
+import { createMotion } from './motion.js';
 
 const readFile = name => new Promise((resolve, reject) => {
   const x = new XMLHttpRequest(); x.open('GET', name); x.responseType = 'arraybuffer';
@@ -108,38 +109,45 @@ async function main(modelBuffer) {
   const val = Object.fromEntries(Object.entries(SLIDERS).map(([k, s]) => [k, s.def]));
   let fine = {};   // bone -> [x,y,z] degrees added on top of the sliders
   let breathe = true, selected = null, t = 0;
-  const basePose = () => {
+  const basePose = (V = val) => {
     const P = {};
     const add = (b, a, d) => { (P[b] ||= [0, 0, 0])[a] += d; };
-    for (const [k, s] of Object.entries(SLIDERS)) for (const [b, a, f] of s.targets) add(b, a, f(val[k]));
+    for (const [k, s] of Object.entries(SLIDERS)) for (const [b, a, f] of s.targets) add(b, a, f(V[k]));
     for (const side of ['left', 'right']) {
       const sg = side === 'left' ? -1 : 1;
       for (const [f, segs] of Object.entries(CURL)) ['Proximal', 'Intermediate', 'Distal'].forEach((g, i) => {
-        add(`${side}${f}${g}`, 2, sg * segs[i] * val.fingers / 100 * val[`${side[0]}F${f}`] / 100);
-        if (i === 0) add(`${side}${f}${g}`, 1, -sg * SPREAD[f] * val.spread / 100);
+        add(`${side}${f}${g}`, 2, sg * segs[i] * V.fingers / 100 * V[`${side[0]}F${f}`] / 100);
+        if (i === 0) add(`${side}${f}${g}`, 1, -sg * SPREAD[f] * V.spread / 100);
       });
-      const tc = val[`${side[0]}FThumb`] / 100, ti = val[`${side[0]}ThumbIn`] / 100;
+      const tc = V[`${side[0]}FThumb`] / 100, ti = V[`${side[0]}ThumbIn`] / 100;
       // thumb: swing across the palm (fold-in), then curl the two outer joints toward the palm
       add(`${side}ThumbMetacarpal`, 1, -sg * (THUMB + 35 * ti)); add(`${side}ThumbMetacarpal`, 0, 20 * ti);
       add(`${side}ThumbProximal`, 1, -sg * 30 * tc); add(`${side}ThumbDistal`, 1, -sg * 35 * tc);
     }
     return P;
   };
-  const fullPose = () => {
-    const P = basePose();
-    for (const [b, f] of Object.entries(fine)) { P[b] ||= [0, 0, 0]; for (let a = 0; a < 3; a++) P[b][a] += f[a]; }
+  const fullPose = (V = val, F = fine) => {
+    const P = basePose(V);
+    for (const [b, f] of Object.entries(F)) { P[b] ||= [0, 0, 0]; for (let a = 0; a < 3; a++) P[b][a] += f[a]; }
     for (const b of Object.keys(P)) P[b] = P[b].map(x => Math.round(x * 10) / 10);
     return P;
   };
   const D = THREE.MathUtils.degToRad, e = new THREE.Euler();
-  const apply = () => {
-    const P = fullPose(), bs = Math.sin(2 * Math.PI * t / 4.2), ss = Math.sin(2 * Math.PI * t / 10);
+  const bq = new THREE.Quaternion();
+  const apply = dt => {
+    const bs = Math.sin(2 * Math.PI * t / 4.2), ss = Math.sin(2 * Math.PI * t / 10);
+    const M = motion?.playing ? motion.sample(dt, AX) : null, P = M ? null : fullPose();
     for (const b of Object.keys(vrm.humanoid.humanBones)) {
       const node = N(b); if (!node || (gizmo.dragging && node === selected?.node)) continue;
-      const p = P[b] || [0, 0, 0], br = breathe ? (BREATH[b] || [0, 0, 0]) : [0, 0, 0], sw = breathe ? (SWAY[b] || [0, 0, 0]) : [0, 0, 0];
+      const br = breathe ? (BREATH[b] || [0, 0, 0]) : [0, 0, 0], sw = breathe ? (SWAY[b] || [0, 0, 0]) : [0, 0, 0];
+      if (M) {   // motion playback: slerped key pose, breathing on top
+        node.quaternion.copy(M.q[b] || bq.identity()).multiply(bq.setFromEuler(e.set(AX[0] * D(br[0] * bs + sw[0] * ss), AX[1] * D(br[1] * bs + sw[1] * ss), AX[2] * D(br[2] * bs + sw[2] * ss), 'XYZ')));
+        continue;
+      }
+      const p = P[b] || [0, 0, 0];
       node.quaternion.setFromEuler(e.set(AX[0] * D(p[0] + br[0] * bs + sw[0] * ss), AX[1] * D(p[1] + br[1] * bs + sw[1] * ss), AX[2] * D(p[2] + br[2] * bs + sw[2] * ss), 'XYZ'));
     }
-    hips.position.copy(hips0); hips.position.x += AX[0] * val.weight / 100;   // no sway preview here: the editor has no foot pinning
+    hips.position.copy(hips0); hips.position.x += AX[0] * (M ? M.hips : val.weight) / 100;   // no sway preview here: the editor has no foot pinning
   };
 
   // gizmo edits become per-bone fine offsets
@@ -174,12 +182,12 @@ async function main(modelBuffer) {
   // ---- panel
   const el = (tag, attrs = {}, ...kids) => { const x = document.createElement(tag); Object.assign(x, attrs); kids.forEach(k => x.append(k)); return x; };
   const root = document.getElementById('panel'); root.innerHTML = '';
-  const tabs = { pose: el('div'), appearance: el('div'), expression: el('div') }, tabBar = el('div', { className: 'tabs' });
-  for (const [k, lab] of [['pose', '站姿'], ['appearance', '外观'], ['expression', '表情']]) {
+  const tabs = { pose: el('div'), motion: el('div'), appearance: el('div'), expression: el('div') }, tabBar = el('div', { className: 'tabs' });
+  for (const [k, lab] of [['pose', '站姿'], ['motion', '动作'], ['appearance', '外观'], ['expression', '表情']]) {
     const b = el('button', { textContent: lab, onclick: () => { for (const [n, d] of Object.entries(tabs)) d.hidden = n !== k; tabBar.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)); } });
     tabBar.append(b); if (k === 'pose') b.classList.add('on'); else tabs[k].hidden = true;
   }
-  root.append(tabBar, tabs.pose, tabs.appearance, tabs.expression);
+  root.append(tabBar, tabs.pose, tabs.motion, tabs.appearance, tabs.expression);
   const panel = tabs.pose;
   const pack = await readJSON('pack/pack.json').catch(() => null);
   const app = createAppearance({ vrm, pack, el, tabs });
@@ -228,6 +236,10 @@ async function main(modelBuffer) {
     fine = j.fine || {}; if (j.name) nameIn.value = j.name; app.load(j.appearance);
     for (const k of Object.keys(inputs)) { inputs[k].r.value = val[k]; inputs[k].show(); } showFine();
   };
+  const motion = createMotion({ el, box: tabs.motion, status: m => { status.textContent = m; },
+    snapshot: () => ({ sliders: { ...val }, fine: JSON.parse(JSON.stringify(fine)) }),
+    restore: st => load({ sliders: st.sliders, fine: JSON.parse(JSON.stringify(st.fine || {})) }),
+    poseOf: st => fullPose({ ...val, ...st.sliders }, st.fine || {}) });
   document.getElementById('download').onclick = () => {
     const j = toJSON(), a = el('a', { href: URL.createObjectURL(new Blob([JSON.stringify(j, null, 1)], { type: 'application/json' })), download: `stance-${j.name}.json` });
     a.click(); status.textContent = `已保存 stance-${j.name}.json 到「下载」文件夹`;
@@ -257,10 +269,10 @@ async function main(modelBuffer) {
   const clock = new THREE.Clock(); let lastSave = 0;
   renderer.setAnimationLoop(() => {
     const dt = Math.min(clock.getDelta(), 0.05); t += dt;
-    apply(); app.beforeUpdate(); vrm.update(dt); app.afterUpdate(); renderer.render(scene, camera);
+    apply(dt); app.beforeUpdate(); vrm.update(dt); app.afterUpdate(); renderer.render(scene, camera);
     if (t - lastSave > 1) { lastSave = t; save(); }
   });
-  window.editor = { vrm, val, get fine() { return fine; }, toJSON, select, app };
+  window.editor = { vrm, val, get fine() { return fine; }, toJSON, select, app, motionJSON: () => motion.toJSON() };
   stop = () => { renderer.setAnimationLoop(null); gizmo.detach(); gizmo.dispose(); orbit.dispose(); renderer.dispose(); removeEventListener('resize', resize); };
   status.textContent = pack ? `已载入预设包：${pack.name}` : '';
 }

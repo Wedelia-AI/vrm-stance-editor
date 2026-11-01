@@ -1,7 +1,9 @@
-# Turn a pose saved by the stance editor into a looping VRMA idle: a key pose in VRM normalized space
+# Author a character's own standing idle as a VRMA (11-01, persona stance): a key pose in VRM normalized space
 # (rest = T-pose, faces +Z, character's left = +X; Euler XYZ degrees per humanoid bone, applied in each bone's frame)
-# plus slow breathing / weight shift layered on top. Pin the feet in your player (the weight shift moves the hips).
+# plus slow breathing / weight shift layered on top. Feet are pinned in the App scene (perform.js plantFeet).
 # usage: python pose_vrma.py model.vrm pose.json out.vrma [seconds=8]
+#   or a motion file from the editor's motion tab ({"keys": [{"t", "ease", "pose", "hips_offset_cm"}, ...]}):
+#   the clip runs the keys once (its length = the last key's time), breathing on top.
 # pose.json: {"pose": {"head": [x, y, z], ...}, "breath": {"bone": [x, y, z] amplitude deg, ...},
 #             "sway": {"bone": [x, y, z] deg, ...}, "hips_sway_cm": [x, z], "breath_s": 4.2, "sway_s": 7.3}
 import json, struct, sys, math
@@ -9,6 +11,21 @@ import numpy as np
 
 vrm_path, pose_path, out = sys.argv[1:4]; secs = float(sys.argv[4]) if len(sys.argv) > 4 else 8.0
 P = json.load(open(pose_path))
+KEYS = P.get('keys')
+BREATH0 = {'spine': [0.3, 0, 0], 'chest': [0.6, 0, 0], 'neck': [-0.5, 0, 0], 'head': [-0.3, 0, 0], 'leftShoulder': [0, 0, 0.8], 'rightShoulder': [0, 0, -0.8]}
+if KEYS:   # motion: length from the keys, the editor's breathing
+    secs = KEYS[-1]['t']; P.setdefault('breath', BREATH0); P.setdefault('sway', {}); P.setdefault('hips_sway_cm', [0, 0])
+    P['pose'] = {b: [0, 0, 0] for k in KEYS for b in k['pose']}
+EASE = {'平滑': lambda u: u * u * (3 - 2 * u), '缓入缓出': lambda u: 4 * u ** 3 if u < 0.5 else 1 - (-2 * u + 2) ** 3 / 2, '线性': lambda u: u}
+def slerp(a, b, u):
+    a, b = np.array(a, float), np.array(b, float); d = float(np.dot(a, b))
+    if d < 0: b, d = -b, -d
+    if d > 0.9995: r = a + (b - a) * u; return r / np.linalg.norm(r)
+    th = math.acos(d); return (math.sin((1 - u) * th) * a + math.sin(u * th) * b) / math.sin(th)
+def key_at(t):   # index of the segment and eased u
+    i = next((n for n, k in enumerate(KEYS) if k['t'] > t), len(KEYS) - 1); a = max(0, i - 1)
+    span = KEYS[i]['t'] - KEYS[a]['t']; u = EASE.get(KEYS[i].get('ease', '平滑'), EASE['平滑'])(min(1, max(0, (t - KEYS[a]['t']) / span))) if span > 0 else 1
+    return a, i, u
 raw = open(vrm_path, 'rb').read(); jl = struct.unpack_from('<I', raw, 12)[0]; G = json.loads(raw[20:20 + jl])
 HB = {k: v['node'] for k, v in G['extensions']['VRMC_vrm']['humanoid']['humanBones'].items()}
 
@@ -72,12 +89,19 @@ for b in names:
     qs = []
     for t in ts:
         a, s = math.sin(2 * math.pi * t / bs), math.sin(2 * math.pi * t / ss)
-        qs.append(euler(*[base[k] + br[k] * a + sw[k] * s for k in range(3)]))
+        if KEYS:
+            ka, kb, u = key_at(t)
+            q0 = slerp(euler(*KEYS[ka]['pose'].get(b, [0, 0, 0])), euler(*KEYS[kb]['pose'].get(b, [0, 0, 0])), u)
+            qs.append(qmul(q0, euler(*[br[k] * a + sw[k] * s for k in range(3)])))
+        else:
+            qs.append(euler(*[base[k] + br[k] * a + sw[k] * s for k in range(3)]))
     samplers.append({'input': t_acc, 'output': accessor(np.array(qs), 'VEC4'), 'interpolation': 'LINEAR'})
     channels.append({'sampler': len(samplers) - 1, 'target': {'node': idx[b], 'path': 'rotation'}})
 hx, hz = P.get('hips_sway_cm', [0, 0]); ox, oz = P.get('hips_offset_cm', [0, 0])
+def hips_x(t):
+    ka, kb, u = key_at(t); A = KEYS[ka].get('hips_offset_cm', [0, 0])[0]; B = KEYS[kb].get('hips_offset_cm', [0, 0])[0]; return A + (B - A) * u
 hp = [nodes[idx['hips']]['translation'][k] for k in range(3)]
-pos = [[hp[0] + ox / 100 + hx / 100 * math.sin(2 * math.pi * t / ss), hp[1], hp[2] + oz / 100 + hz / 100 * math.sin(2 * math.pi * t / ss + 1)] for t in ts]
+pos = [[hp[0] + (hips_x(t) if KEYS else ox) / 100 + hx / 100 * math.sin(2 * math.pi * t / ss), hp[1], hp[2] + oz / 100 + hz / 100 * math.sin(2 * math.pi * t / ss + 1)] for t in ts]
 samplers.append({'input': t_acc, 'output': accessor(np.array(pos), 'VEC3'), 'interpolation': 'LINEAR'})
 channels.append({'sampler': len(samplers) - 1, 'target': {'node': idx['hips'], 'path': 'translation'}})
 J = {'asset': {'version': '2.0', 'generator': 'pose_vrma.py'}, 'extensionsUsed': ['VRMC_vrm_animation'],
