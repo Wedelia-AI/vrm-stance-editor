@@ -1,0 +1,6 @@
+node_modules/
+dist/
+*.vrm
+*.vrma
+pack/
+.DS_Store

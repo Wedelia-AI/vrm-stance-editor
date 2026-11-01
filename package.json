@@ -1,0 +1,9 @@
+{
+  "name": "vrm-stance-editor",
+  "version": "0.1.0",
+  "description": "Browser editor for a VRM character's standing pose, outfit/colour variants and expressions; exports the pose for a VRMA idle clip",
+  "license": "MIT",
+  "type": "module",
+  "scripts": { "build": "node build.mjs dist", "serve": "python3 -m http.server 8080 --directory dist" },
+  "dependencies": { "@pixiv/three-vrm": "3.5.5", "esbuild": "0.25.10", "three": "0.186.1" }
+}
