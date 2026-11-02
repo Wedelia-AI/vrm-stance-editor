@@ -241,6 +241,23 @@ async function main(modelBuffer) {
       r.oninput = () => { (fine[selected.name] ||= [0, 0, 0])[a] = +r.value; out.textContent = `${r.value}°`; };
       fineBox.append(el('label', {}, el('span', { textContent: lab }), r, out));
     });
+    // straighten this part in world space (Jack 11-02): drop its tilt but keep which way it faces. Spine / neck / head /
+    // legs go back to vertical, shoulders / arms / hands / feet to level -- the direction they have in the rest pose
+    const straighten = (pitch, roll) => {
+      const n = selected.node, Qw = n.getWorldQuaternion(new THREE.Quaternion()), Qr = vrm.scene.getWorldQuaternion(new THREE.Quaternion());
+      const eu = new THREE.Euler().setFromQuaternion(Qw.clone().multiply(Qr.clone().invert()), 'YXZ');   // y turn, x lean fwd/back, z tilt sideways
+      if (pitch) eu.x = 0; if (roll) eu.z = 0;
+      const want = new THREE.Quaternion().setFromEuler(eu).multiply(Qr), Qp = n.parent.getWorldQuaternion(new THREE.Quaternion());
+      n.quaternion.copy(Qp.invert().multiply(want));
+      const base = basePose()[selected.name] || [0, 0, 0];
+      e.setFromQuaternion(n.quaternion, 'XYZ');
+      fine[selected.name] = [e.x, e.y, e.z].map((r, ax) => Math.round((AX[ax] * THREE.MathUtils.radToDeg(r) - base[ax]) * 10) / 10);
+      showFine();
+    };
+    fineBox.append(el('div', { className: 'chips' },
+      el('button', { textContent: '全部回正（竖直 / 水平）', title: '去掉前后倾和左右歪，只保留朝向', onclick: () => straighten(true, true) }),
+      el('button', { textContent: '只去左右歪', onclick: () => straighten(false, true) }),
+      el('button', { textContent: '只去前后倾', onclick: () => straighten(true, false) })));
     fineBox.append(el('button', { textContent: '清除这根骨头的细调', onclick: () => { delete fine[selected.name]; showFine(); } }),
       el('button', { textContent: '取消选择', onclick: () => select(null) }));
   }
