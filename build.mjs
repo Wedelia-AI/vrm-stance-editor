@@ -41,7 +41,8 @@ label span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap
 <label class="file" style="display:inline-block">载入模型<input id="openmodel" type="file" accept=".vrm" hidden></label>
 <button id="reset">恢复初版</button>
 <span id="views"></span>
-<select id="light" title="灯光"><option value="day">灯光：白天</option><option value="evening">灯光：傍晚</option></select>
+<select id="light" title="灯光"><option value="day">灯光：白天</option><option value="evening">灯光：傍晚</option><option value="night">灯光：夜晚</option></select>
+<select id="backdrop" title="背景（预设包 pack/backdrops.json）" hidden><option value="">背景：无</option></select>
 <label style="display:inline-flex;gap:4px;margin:0;white-space:nowrap"><input id="breathe" type="checkbox" checked>呼吸</label>
 <select id="refsel"><option value="">参考图：无</option>${opts}</select><label class="file" style="display:inline-block">选参考图<input id="refpick" type="file" accept="image/*" hidden></label><input id="refop" type="range" min="20" max="100" value="85" style="width:70px" title="参考图透明度">
 <span id="status"></span></div>
