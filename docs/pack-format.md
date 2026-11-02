@@ -27,3 +27,18 @@
 
 Mesh names are the scene object names three.js gives the VRM's meshes (a multi-material mesh is listed once, by its
 group name). Material names are the glTF material names.
+
+## Backdrops (optional)
+
+`pack/backdrops.json` adds a backdrop picker next to the light switch. Picking a plate shows it behind the model
+(the floor grid hides) and switches the light to the plate's period, with the key light from the given side:
+
+```jsonc
+{ "backdrops": [
+  { "file": "bd-day_meadow.jpg", "period": "day", "side": "right" },        // period: day | evening | night
+  { "file": "bd-night_room.jpg", "period": "night", "side": "left" }        // side: where the key light comes from
+] }
+```
+
+The plates sit next to it in `pack/`. The light presets (day / evening / night, with a warm fill from the other side
+at night) match the scene that plays the character, so a stance can be checked against the light it will be seen in.

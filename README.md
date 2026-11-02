@@ -11,7 +11,7 @@ exporting the pose as a looping VRMA idle.
 - **Stance / 站姿**: sliders per body part (head tilt, body turn, shoulders, arms, elbows, wrists, legs, knee-in,
   toe-in, weight), per-finger curl with hand presets (relaxed, open, fist, V sign, pointing), and a rotate gizmo:
   click any body part or finger and drag. Camera presets (front, three-quarter, side, back, hands, face), breathing
-  preview, day / evening lighting, a reference image overlay.
+  preview, day / evening / night lighting, painted backdrops from the pack, a reference image overlay.
 - **Motion / 动作**: small habitual motions as key poses — add a key from the current stance, pose the next one
   (say, a hand up to the hair), set times and easing, play / loop, and save `motion-<name>.json`.
 - **AI motions / AI 生成动作** (optional): describe a motion in a sentence ("tuck the hair behind the right ear"); a

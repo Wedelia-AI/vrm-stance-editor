@@ -83,12 +83,28 @@ async function main(modelBuffer) {
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(24, 1, 0.05, 30);
   const key = new THREE.DirectionalLight(0xffffff, 2.6), hemi = new THREE.HemisphereLight(0xf6f7ff, 0xd8d2d0, 0.6); key.position.set(1.2, 3, 1.5);
-  scene.add(key, hemi);
-  const LIGHTS = { day: [0xffffff, 2.6, 0xf6f7ff, 0xd8d2d0, 0.6], evening: [0xffdcb8, 2.9, 0xffeee4, 0xc9a49c, 0.6] };
+  const fill = new THREE.DirectionalLight(0xffffff, 0);
+  scene.add(key, hemi, fill);
+  // same day / evening / night light as the App scene (fill = warm lamps / fairy lights from the other side at night)
+  const LIGHTS = { day: [0xffffff, 2.6, 0xf6f7ff, 0xd8d2d0, 0.6, 0xffffff, 0], evening: [0xffc89a, 2.8, 0xffe2cc, 0xb08a80, 0.5, 0xb8b0ff, 0.25],
+    night: [0xaebcff, 1.1, 0x6f7db8, 0x2a2636, 0.42, 0xffc48a, 0.8] };
   const lightSel = document.getElementById('light');
-  lightSel.onchange = () => { const L = LIGHTS[lightSel.value]; key.color.setHex(L[0]); key.intensity = L[1]; hemi.color.setHex(L[2]); hemi.groundColor.setHex(L[3]); hemi.intensity = L[4]; };
+  let keySide = 1;
+  lightSel.onchange = () => { const L = LIGHTS[lightSel.value]; key.color.setHex(L[0]); key.intensity = L[1]; hemi.color.setHex(L[2]); hemi.groundColor.setHex(L[3]); hemi.intensity = L[4];
+    fill.color.setHex(L[5]); fill.intensity = L[6]; key.position.set(1.2 * keySide, 3, 1.5); fill.position.set(-1.4 * keySide, 1.8, 1.8); };
   lightSel.onchange();
   const grid = new THREE.GridHelper(2, 20, 0xb59a90, 0xd9c6be); scene.add(grid);
+  // painted backdrops (optional pack/backdrops.json: [{ file, period, side }]): picking one shows it behind her and
+  // switches the light to its period / side, like the App scene does by the clock
+  const bdSel = document.getElementById('backdrop');
+  readJSON('pack/backdrops.json').then(B => {
+    const PZ = { day: '白天', evening: '傍晚', night: '夜晚' }; bdSel.length = 1;   // a reloaded model rebuilds the list
+    for (const b of B.backdrops || []) bdSel.append(Object.assign(document.createElement('option'), { value: b.file, textContent: `背景：${PZ[b.period] || b.period} · ${b.file.replace(/^bd-|\.jpg$/g, '')}` }));
+    bdSel.hidden = false;
+    bdSel.onchange = () => { const b = (B.backdrops || []).find(x => x.file === bdSel.value);
+      view.style.background = b ? `url(pack/${b.file}) center/cover no-repeat` : ''; grid.visible = !b;
+      if (b) { keySide = b.side === 'left' ? -1 : 1; lightSel.value = b.period in LIGHTS ? b.period : 'day'; lightSel.onchange(); } };
+  }).catch(() => {});
 
   const loader = new GLTFLoader(); loader.register(p => new VRMLoaderPlugin(p));
   const vrm = (await loader.parseAsync(modelBuffer || await readFile('model.vrm'), '')).userData.vrm;
