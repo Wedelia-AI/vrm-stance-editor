@@ -12,7 +12,7 @@ import numpy as np
 vrm_path, pose_path, out = sys.argv[1:4]; secs = float(sys.argv[4]) if len(sys.argv) > 4 else 8.0
 P = json.load(open(pose_path))
 FRAMES = P.get('frames')   # the editor's baked motion (30 fps, spline + collision): use it as is
-if FRAMES: P['keys'] = [{'t': f['t'], 'ease': '线性', 'pose': f['pose'], 'hips_offset_cm': f.get('hips_offset_cm', [0, 0]), 'expr': f.get('expr', {})} for f in FRAMES]
+if FRAMES: P['keys'] = [{'t': f['t'], 'ease': '线性', 'pose': f['pose'], 'hips_offset_cm': f.get('hips_offset_cm', [0, 0]), 'hips_y_cm': f.get('hips_y_cm', 0), 'expr': f.get('expr', {})} for f in FRAMES]
 KEYS = P.get('keys')
 BREATH0 = {'spine': [0.3, 0, 0], 'chest': [0.6, 0, 0], 'neck': [-0.5, 0, 0], 'head': [-0.3, 0, 0], 'leftShoulder': [0, 0, 0.8], 'rightShoulder': [0, 0, -0.8]}
 if KEYS:   # motion: length from the keys, the editor's breathing
@@ -100,24 +100,30 @@ for b in names:
     samplers.append({'input': t_acc, 'output': accessor(np.array(qs), 'VEC4'), 'interpolation': 'LINEAR'})
     channels.append({'sampler': len(samplers) - 1, 'target': {'node': idx[b], 'path': 'rotation'}})
 hx, hz = P.get('hips_sway_cm', [0, 0]); ox, oz = P.get('hips_offset_cm', [0, 0])
-def hips_x(t):
-    ka, kb, u = key_at(t); A = KEYS[ka].get('hips_offset_cm', [0, 0])[0]; B = KEYS[kb].get('hips_offset_cm', [0, 0])[0]; return A + (B - A) * u
+def hips_off(t):   # keys: hips_offset_cm [x, z] (the editor only sets x) + hips_y_cm (mocap foot lock, 11-02)
+    ka, kb, u = key_at(t); A, B = KEYS[ka], KEYS[kb]
+    ax_, az_ = (A.get('hips_offset_cm', [0, 0]) + [0])[:2]; bx_, bz_ = (B.get('hips_offset_cm', [0, 0]) + [0])[:2]
+    ay_, by_ = A.get('hips_y_cm', 0), B.get('hips_y_cm', 0)
+    return ax_ + (bx_ - ax_) * u, ay_ + (by_ - ay_) * u, az_ + (bz_ - az_) * u
 hp = [nodes[idx['hips']]['translation'][k] for k in range(3)]
-pos = [[hp[0] + (hips_x(t) if KEYS else ox) / 100 + hx / 100 * math.sin(2 * math.pi * t / ss), hp[1], hp[2] + oz / 100 + hz / 100 * math.sin(2 * math.pi * t / ss + 1)] for t in ts]
+pos = []
+for t in ts:
+    kx, ky, kz = hips_off(t) if KEYS else (ox, 0, 0)
+    pos.append([hp[0] + kx / 100 + hx / 100 * math.sin(2 * math.pi * t / ss), hp[1] + ky / 100, hp[2] + (kz + oz) / 100 + hz / 100 * math.sin(2 * math.pi * t / ss + 1)])
 samplers.append({'input': t_acc, 'output': accessor(np.array(pos), 'VEC3'), 'interpolation': 'LINEAR'})
 channels.append({'sampler': len(samplers) - 1, 'target': {'node': idx['hips'], 'path': 'translation'}})
 # expressions (VRMC_vrm_animation: one node per expression, weight = translation.x)
 expr_names = sorted({n for k in (KEYS or []) for n in (k.get('expr') or {})})
 PRESETS = {'happy', 'angry', 'sad', 'relaxed', 'surprised', 'aa', 'ih', 'ou', 'ee', 'oh', 'blink', 'blinkLeft', 'blinkRight', 'lookUp', 'lookDown', 'lookLeft', 'lookRight', 'neutral'}
 expr_ext = {'preset': {}, 'custom': {}}
-for n in expr_names:
-    nodes.append({'name': f'expr_{n}'}); ni = len(nodes) - 1
+for en in expr_names:
+    nodes.append({'name': f'expr_{en}'}); ni = len(nodes) - 1
     vals = []
     for t in ts:
-        ka, kb, u = key_at(t); a = (KEYS[ka].get('expr') or {}).get(n, 0); b = (KEYS[kb].get('expr') or {}).get(n, 0); vals.append([a + (b - a) * u, 0, 0])
+        ka, kb, u = key_at(t); a = (KEYS[ka].get('expr') or {}).get(en, 0); b = (KEYS[kb].get('expr') or {}).get(en, 0); vals.append([a + (b - a) * u, 0, 0])
     samplers.append({'input': t_acc, 'output': accessor(np.array(vals), 'VEC3'), 'interpolation': 'LINEAR'})
     channels.append({'sampler': len(samplers) - 1, 'target': {'node': ni, 'path': 'translation'}})
-    expr_ext['preset' if n in PRESETS else 'custom'][n] = {'node': ni}
+    expr_ext['preset' if en in PRESETS else 'custom'][en] = {'node': ni}
 anim_ext = {'specVersion': '1.0', 'humanoid': {'humanBones': {b: {'node': idx[b]} for b in order}}}
 if expr_names: anim_ext['expressions'] = {k: v for k, v in expr_ext.items() if v}
 J = {'asset': {'version': '2.0', 'generator': 'pose_vrma.py'}, 'extensionsUsed': ['VRMC_vrm_animation'],
